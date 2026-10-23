@@ -1,0 +1,17 @@
+<script setup lang="ts">
+import { computed } from "vue";
+import { marked } from "marked";
+import DOMPurify from "dompurify";
+const props = defineProps<{ text: string }>();
+const html = computed(() =>
+  DOMPurify.sanitize(
+    marked.parse(props.text || "", { async: false }) as string,
+    {
+      USE_PROFILES: { html: true },
+      FORBID_TAGS: ["img", "style", "iframe", "form", "input", "button"],
+      FORBID_ATTR: ["style", "id", "name"],
+    },
+  ),
+);
+</script>
+<template><div class="markdown" v-html="html"></div></template>
