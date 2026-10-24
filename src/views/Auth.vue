@@ -27,6 +27,7 @@ async function submit() {
     const name = username.value.trim().toLowerCase(),
       challenge = await api(
         "/api/auth/challenge?username=" + encodeURIComponent(name),
+        { anonymous: true },
       );
     const proof = await deriveProof(password.value, challenge);
     const result = await api(
@@ -34,6 +35,7 @@ async function submit() {
         (setup.value ? "bootstrap" : register.value ? "register" : "login"),
       {
         method: "POST",
+        anonymous: true,
         json: {
           username: name,
           nickname: nickname.value,
@@ -46,7 +48,7 @@ async function submit() {
     password.value = "";
     confirm.value = "";
     token.value = "";
-    setSession(result.user, result.token);
+    setSession(result.user, result.token, result.expiresAt);
     toast(
       setup.value
         ? "管理员已创建"

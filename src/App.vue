@@ -19,14 +19,11 @@ const section = computed(() =>
           ? "我的空间"
           : "比赛广场",
 );
-onMounted(async () => {
-  try {
-    if (auth.token) await refreshUser();
-  } catch {
-    /* Page-level errors provide retry controls. */
-  } finally {
-    auth.ready = true;
-  }
+function restoreLogin() {
+  void refreshUser().catch(() => {});
+}
+onMounted(() => {
+  if (auth.token) restoreLogin();
 });
 async function signOut() {
   await logout().catch(() => {});
@@ -76,6 +73,16 @@ function skipToContent() {
         <Icon name="logout" :size="17" />
       </button>
     </div>
+    <button
+      v-else-if="auth.token"
+      class="sidebar-join"
+      :disabled="!auth.ready"
+      @click="restoreLogin"
+    >
+      <Icon name="user" :size="18" />{{
+        auth.ready ? "重试连接" : "恢复登录中…"
+      }}
+    </button>
     <RouterLink v-else class="sidebar-join" to="/register"
       ><Icon name="user" :size="18" />加入 scorem <Icon name="arrow" :size="16"
     /></RouterLink>
@@ -87,7 +94,14 @@ function skipToContent() {
       >
       <div class="top-actions">
         <span class="community-dot">算法竞赛评价社区</span
-        ><RouterLink v-if="!auth.user" class="btn small" to="/login"
+        ><button
+          v-if="auth.token && !auth.user"
+          class="btn small"
+          :disabled="!auth.ready"
+          @click="restoreLogin"
+        >
+          {{ auth.ready ? "重试连接" : "恢复登录中…" }}</button
+        ><RouterLink v-else-if="!auth.user" class="btn small" to="/login"
           >登录</RouterLink
         ><RouterLink
           v-else
@@ -98,7 +112,9 @@ function skipToContent() {
         >
       </div>
     </header>
-    <main id="main" tabindex="-1"><RouterView :key="route.path" /></main>
+    <main id="main" tabindex="-1">
+      <RouterView :key="route.path + ':' + (auth.user?.id || 'guest')" />
+    </main>
     <footer class="footer">
       <span><strong>scorem.</strong> 让好的题目被看见。</span
       ><span>质量评价与竞技 Rating 独立计算</span>

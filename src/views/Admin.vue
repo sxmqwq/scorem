@@ -156,7 +156,18 @@ onUnmounted(() => {
   <p v-if="error" class="error-box" role="alert">
     {{ error }} <button class="text-btn" @click="load()">重新加载</button>
   </p>
-  <section v-if="!allowed && !busy" class="panel empty-state">
+  <section
+    v-if="auth.token && !auth.user"
+    class="panel empty-state"
+    role="status"
+  >
+    <h2>{{ busy ? "正在恢复登录…" : "暂时无法连接账号服务" }}</h2>
+    <p>登录信息已保留，请稍后重试。</p>
+    <button class="btn primary" :disabled="busy" @click="load()">
+      重试连接
+    </button>
+  </section>
+  <section v-else-if="!allowed && !busy" class="panel empty-state">
     <Icon name="shield" :size="34" />
     <h2>此页面需要管理员权限</h2>
     <RouterLink v-if="!auth.user" to="/login" class="btn primary"

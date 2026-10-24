@@ -32,10 +32,12 @@ async function load(page = 1) {
 onMounted(() => load());
 async function profile() {
   await run(async () => {
+    const token = auth.token;
     const r = await api("/api/auth/profile", {
       method: "PATCH",
       json: { nickname: nickname.value },
     });
+    if (auth.token !== token) return;
     auth.user = r.user;
     toast("昵称已更新");
   });
@@ -43,18 +45,22 @@ async function profile() {
 async function password() {
   await run(async () => {
     if (!auth.user) return;
+    const token = auth.token,
+      username = auth.user.username;
     if (newPassword.value.length < 12 || newPassword.value.length > 128)
       throw Error("新密码需要 12–128 个字符");
     if (newPassword.value !== confirm.value) throw Error("两次新密码不一致");
     const c = await api(
-      "/api/auth/challenge?username=" + encodeURIComponent(auth.user.username),
+      "/api/auth/challenge?username=" + encodeURIComponent(username),
     );
     const currentProof = await deriveProof(currentPassword.value, c),
       newProof = await deriveProof(newPassword.value, c);
+    if (auth.token !== token) throw Error("登录账号已切换，请重新操作。");
     await api("/api/auth/password", {
       method: "POST",
       json: { currentProof, newProof },
     });
+    if (auth.token !== token) return;
     currentPassword.value = "";
     newPassword.value = "";
     confirm.value = "";
@@ -73,7 +79,19 @@ async function password() {
   <p v-if="error" class="error-box" role="alert">
     {{ error }} <button class="text-btn" @click="load()">重试</button>
   </p>
-  <section v-if="!auth.user" class="panel empty-state">
+  <section
+    v-if="auth.token && !auth.user"
+    class="panel empty-state"
+    role="status"
+  >
+    <Icon name="user" :size="34" />
+    <h2>{{ busy ? "正在恢复登录…" : "暂时无法连接账号服务" }}</h2>
+    <p>登录信息已保留，请稍后重试。</p>
+    <button class="btn primary" :disabled="busy" @click="load()">
+      重试连接
+    </button>
+  </section>
+  <section v-else-if="!auth.user" class="panel empty-state">
     <Icon name="user" :size="34" />
     <h2>登录后进入你的空间</h2>
     <p>已有账号可以直接登录，新成员需要先提交注册申请。</p>

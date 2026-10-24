@@ -215,7 +215,18 @@ onMounted(load);
     </p>
   </section>
   <p v-if="error" class="error-box" role="alert">{{ error }}</p>
-  <section v-if="!allowed && !busy" class="panel empty-state">
+  <section
+    v-if="auth.token && !auth.user"
+    class="panel empty-state"
+    role="status"
+  >
+    <h2>{{ busy ? "正在恢复登录…" : "暂时无法连接账号服务" }}</h2>
+    <p>登录信息已保留，请稍后重试。</p>
+    <button class="btn primary" :disabled="busy" @click="load()">
+      重试连接
+    </button>
+  </section>
+  <section v-else-if="!allowed && !busy" class="panel empty-state">
     <h2>需要管理员权限</h2>
     <RouterLink class="btn" to="/login">登录</RouterLink>
   </section>

@@ -17,33 +17,100 @@ export interface Page {
   pageSize: number;
   ratingsDirty?: boolean;
 }
-const tokenKey = "scorem.session.v1";
-const getToken = () => {
-  try {
-    return sessionStorage.getItem(tokenKey) || "";
-  } catch {
-    return "";
-  }
-};
-export const auth = reactive({
-  user: null as User | null,
-  token: getToken(),
-  ready: false,
-});
 export const apiBase = (import.meta.env.VITE_API_BASE_URL || "").replace(
   /\/$/,
   "",
 );
-export function setSession(user: User | null, token = "") {
-  auth.user = user;
-  auth.token = token;
+const tokenKey = "scorem.session.v2:" + apiBase;
+const legacyKey = "scorem.session.v1";
+interface StoredSession {
+  token: string;
+  expiresAt: number;
+}
+const defaultExpiry = () => Math.floor(Date.now() / 1000) + 7 * 86400;
+function decodeSession(raw: string | null): StoredSession | null {
   try {
-    token
-      ? sessionStorage.setItem(tokenKey, token)
-      : sessionStorage.removeItem(tokenKey);
+    const value = JSON.parse(raw || "null");
+    if (
+      /^[0-9a-f]{64}$/.test(value?.token) &&
+      Number.isFinite(value.expiresAt) &&
+      value.expiresAt > Date.now() / 1000
+    )
+      return { token: value.token, expiresAt: value.expiresAt };
+  } catch {
+    /* Invalid or expired records are not restored. */
+  }
+  return null;
+}
+function storeSession(value: StoredSession | null) {
+  let persisted = false;
+  try {
+    if (value) localStorage.setItem(tokenKey, JSON.stringify(value));
+    else localStorage.removeItem(tokenKey);
+    persisted = true;
+  } catch {
+    /* Fall back to tab storage when persistent storage is unavailable. */
+  }
+  try {
+    sessionStorage.removeItem(legacyKey);
+    if (value && !persisted)
+      sessionStorage.setItem(tokenKey, JSON.stringify(value));
+    else sessionStorage.removeItem(tokenKey);
   } catch {
     /* In-memory sessions remain usable. */
   }
+}
+function restoreSession(): StoredSession | null {
+  try {
+    const raw = localStorage.getItem(tokenKey);
+    if (raw !== null) {
+      const value = decodeSession(raw);
+      if (!value) storeSession(null);
+      return value;
+    }
+  } catch {
+    /* Tab storage can still work when persistent storage is blocked. */
+  }
+  try {
+    const raw = sessionStorage.getItem(tokenKey);
+    if (raw !== null) {
+      const value = decodeSession(raw);
+      storeSession(value);
+      return value;
+    }
+    const legacy = sessionStorage.getItem(legacyKey);
+    if (legacy && /^[0-9a-f]{64}$/.test(legacy)) {
+      const value = { token: legacy, expiresAt: defaultExpiry() };
+      storeSession(value);
+      return value;
+    }
+  } catch {
+    /* Start without a restored session if browser storage is unavailable. */
+  }
+  return null;
+}
+const restored = restoreSession();
+export const auth = reactive({
+  user: null as User | null,
+  token: restored?.token || "",
+  expiresAt: restored?.expiresAt || 0,
+  ready: !restored,
+});
+let sessionVersion = 0;
+const currentSession = (token: string, version: number) =>
+  auth.token === token && sessionVersion === version;
+export function setSession(
+  user: User | null,
+  token = "",
+  expiresAt = defaultExpiry(),
+) {
+  const value = user && token ? { token, expiresAt } : null;
+  sessionVersion++;
+  auth.user = value ? user : null;
+  auth.token = value?.token || "";
+  auth.expiresAt = value?.expiresAt || 0;
+  auth.ready = true;
+  storeSession(value);
 }
 export class ApiError extends Error {
   constructor(
@@ -56,7 +123,7 @@ export class ApiError extends Error {
 }
 export async function api<T = any>(
   path: string,
-  options: RequestInit & { json?: unknown } = {},
+  options: RequestInit & { json?: unknown; anonymous?: boolean } = {},
 ): Promise<T> {
   if (!apiBase)
     throw new ApiError(
@@ -64,26 +131,32 @@ export async function api<T = any>(
       "configuration",
       503,
     );
-  const headers = new Headers(options.headers);
-  if (auth.token) headers.set("Authorization", "Bearer " + auth.token);
-  if (options.json !== undefined)
-    headers.set("Content-Type", "application/json");
+  if (auth.token && auth.expiresAt <= Date.now() / 1000) setSession(null);
+  const { json, anonymous, ...requestOptions } = options;
+  const token = anonymous ? "" : auth.token,
+    version = sessionVersion;
+  const headers = new Headers(requestOptions.headers);
+  if (anonymous) headers.delete("Authorization");
+  else if (token) headers.set("Authorization", "Bearer " + token);
+  if (json !== undefined) headers.set("Content-Type", "application/json");
   const controller = new AbortController(),
     timeout = setTimeout(() => controller.abort(), 25000);
   try {
     const response = await fetch(apiBase + path, {
-      ...options,
+      ...requestOptions,
       headers,
-      body:
-        options.json !== undefined
-          ? JSON.stringify(options.json)
-          : options.body,
-      signal: options.signal || controller.signal,
+      body: json !== undefined ? JSON.stringify(json) : requestOptions.body,
+      signal: requestOptions.signal || controller.signal,
       credentials: "omit",
     });
     if (!response.ok) {
       const data = await response.json().catch(() => ({}));
-      if (response.status === 401 && data.error?.code === "unauthorized")
+      if (
+        token &&
+        currentSession(token, version) &&
+        response.status === 401 &&
+        data.error?.code === "unauthorized"
+      )
         setSession(null);
       throw new ApiError(
         data.error?.message || `请求失败 (${response.status})`,
@@ -99,19 +172,76 @@ export async function api<T = any>(
     clearTimeout(timeout);
   }
 }
-export async function refreshUser() {
-  const r = await api<{ user: User | null }>("/api/auth/me");
-  auth.user = r.user;
-  auth.ready = true;
-  return r.user;
+let refreshing: {
+  token: string;
+  version: number;
+  promise: Promise<User | null>;
+} | null = null;
+export function refreshUser(): Promise<User | null> {
+  const token = auth.token,
+    version = sessionVersion;
+  if (!token) {
+    auth.ready = true;
+    return Promise.resolve(null);
+  }
+  if (refreshing?.token === token && refreshing.version === version)
+    return refreshing.promise;
+  if (!auth.user) auth.ready = false;
+  const result: Promise<User | null> = api<{ user: User | null }>(
+    "/api/auth/me",
+  )
+    .then((r) => {
+      if (!currentSession(token, version)) return auth.user;
+      if (r?.user === null) {
+        setSession(null);
+        return null;
+      }
+      if (!r?.user || typeof r.user.id !== "string")
+        throw new ApiError(
+          "服务返回的登录状态不完整，请重试。",
+          "invalid_response",
+          502,
+        );
+      auth.user = r.user;
+      return r.user;
+    })
+    .finally(() => {
+      if (currentSession(token, version)) auth.ready = true;
+      if (refreshing?.promise === result) refreshing = null;
+    });
+  refreshing = { token, version, promise: result };
+  return result;
 }
 export async function logout() {
+  const token = auth.token,
+    version = sessionVersion;
   try {
-    await api("/api/auth/logout", { method: "POST", json: {} });
+    if (token) await api("/api/auth/logout", { method: "POST", json: {} });
   } finally {
-    setSession(null);
+    if (currentSession(token, version)) setSession(null);
   }
 }
+if (typeof window !== "undefined")
+  window.addEventListener("storage", (event) => {
+    if (event.key !== tokenKey && event.key !== null) return;
+    let value: StoredSession | null;
+    try {
+      value = decodeSession(localStorage.getItem(tokenKey));
+    } catch {
+      return;
+    }
+    if (
+      (value?.token || "") === auth.token &&
+      (value?.expiresAt || 0) === auth.expiresAt
+    )
+      return;
+    sessionVersion++;
+    auth.token = value?.token || "";
+    auth.expiresAt = value?.expiresAt || 0;
+    auth.user = null;
+    auth.ready = !value;
+    if (value) void refreshUser().catch(() => {});
+  });
 export const notification = ref("");
 let toastTimer: ReturnType<typeof setTimeout>;
 export function toast(message: string) {
